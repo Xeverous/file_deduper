@@ -4,8 +4,9 @@ import datetime
 import sys
 import os
 import stat
-from typing import AnyStr, List, Optional, Union
+from typing import AnyStr, Dict, List, Optional, Union
 from hashlib import sha256
+import argparse
 
 # https://stackoverflow.com/questions/53418046/how-do-i-type-hint-a-variable-that-can-be-passed-as-the-first-argument-to-open
 def sha256sum(filename: Union[str, bytes, os.PathLike]) -> bytes:
@@ -17,7 +18,7 @@ def sha256sum(filename: Union[str, bytes, os.PathLike]) -> bytes:
 
 def to_hex(checksum: Optional[bytes]) -> str:
     if checksum is None:
-        return "----------------------------------------------------------------"
+        return "------------------------ (not computed) ------------------------"
     else:
         return checksum.hex()
 
@@ -41,7 +42,7 @@ class Entry:
     def __init__(self, parent: "Optional[Entry]",
                  path: Union[str, bytes, os.PathLike],
                  is_dir: bool, date_modified: int,
-                 size: int, checksum: Optional[bytes]):
+                 size: int, checksum: Optional[bytes]=None):
         self.parent = parent
         self.children: list[Entry] = []
         self.path = path
@@ -65,102 +66,190 @@ def make_entry(parent: Optional[Entry],
                stats: os.stat_result) -> Entry:
     is_dir = stat.S_ISDIR(stats.st_mode)
     if is_dir:
-        checksum = None
         size = 0
     else:
-        checksum = sha256sum(path)
         size = stats.st_size
-    return Entry(parent, path, is_dir, stats.st_mtime, size, checksum)
+    return Entry(parent, path, is_dir, stats.st_mtime, size)
 
-class Database:
+class ScanResult:
     def __init__(self):
-        self.entries_by_name:     dict[str,   list[Entry]] = {}
-        self.entries_by_checksum: dict[bytes, list[Entry]] = {}
+        self.root_objects: list[Entry] = []
+        self.all_objects:  list[Entry] = []
         self.total_dirs  = 0
         self.total_files = 0
         self.total_size  = 0
 
-    def _update_dict(self, d: dict, key, entry: Entry):
-        l = d.get(key)
-        if l:
-            l.append(entry)
-        else:
-            d.update([(key, [entry])])
-
-    def add(self, entry: Entry):
-        self._update_dict(self.entries_by_name, entry.name(), entry)
-        if entry.is_dir:
-            self.total_dirs += 1
-        else:
-            # checksum is computed only for files
-            # directories should compare checksums of their children
-            self._update_dict(self.entries_by_checksum, entry.checksum, entry)
-            self.total_files += 1
-            self.total_size += entry.size
-
-    def print(self):
-        print("duplicate by name:")
-        for name, entries in self.entries_by_name.items():
-            if len(entries) > 1:
-                print(f"\n{name}") # empty line to separate groups of duplicates
-                for entry in entries:
-                    print(entry)
-
-        space_taken_by_duplicates = 0
-        duplicate_sets = 0
-        duplicate_files = 0
-        print("\n\nduplicate by checksum:")
-        for checksum, entries in self.entries_by_checksum.items():
-            if len(entries) > 1:
-                print(f"\n{to_hex(checksum)}") # empty line to separate groups of duplicates
-                for entry in entries:
-                    print(entry)
-                    space_taken_by_duplicates += entry.size
-                duplicates = len(entries) - 1 # -1 because one copy should remain.
-                # It can be very safely assumed that the size of each file with same hash is identical.
-                # As of writing this, there is no known SHA-256 collision.
-                space_taken_by_duplicates += entries[0].size * duplicates
-                duplicate_sets += 1
-                duplicate_files += duplicates
-
-        print(f"\n\ntotal dirs: {self.total_dirs}")
+    def print_stats(self):
+        print("OVERALL STATS:")
+        print(f"total dirs: {self.total_dirs}")
         print(f"total files: {self.total_files}")
         print(f"total size: {pretty_byte_size(self.total_size)}")
-        print()
-        print(f"duplicate sets: {duplicate_sets}")
-        print(f"duplicate files: {duplicate_files}")
-        print(f"space taken by duplicates: {pretty_byte_size(space_taken_by_duplicates)}")
 
-
-def walktree(parent: Entry, database: Database):
+# parent must be a directory
+def scan_recurse(parent: Entry, result: ScanResult):
     for name in os.listdir(parent.path):
         path = os.path.join(parent.path, name)
         stats = os.lstat(path)
         if stat.S_ISDIR(stats.st_mode) or stat.S_ISREG(stats.st_mode):
             entry = make_entry(parent, path, stats)
             parent.children.append(entry)
-            database.add(entry)
+            result.all_objects.append(entry)
             if entry.is_dir:
-                walktree(entry, database)
+                scan_recurse(entry, result)
                 for child in entry.children:
                     entry.size += child.size
+                result.total_dirs += 1
+            else:
+                result.total_files += 1
         else:
-            print(f"Skipping unsupported filesystem type: {path}")
+            print(f"Skipping unsupported object with mode {hex(stats.st_mode)} on '{path}'")
 
-def scan(root_dirs: List[Union[str, bytes, os.PathLike]]):
-    database = Database()
-    for root_dir in root_dirs:
-        root_entry = make_entry(None, root_dir, os.lstat(root_dir))
-        walktree(root_entry, database)
-    database.print()
+def scan(paths: List[Union[str, bytes, os.PathLike]]) -> ScanResult:
+    result = ScanResult()
+
+    for path in paths:
+        stats = os.lstat(path)
+        if stat.S_ISREG(stats.st_mode) or stat.S_ISDIR(stats.st_mode):
+            entry = make_entry(None, path, stats)
+            result.root_objects.append(entry)
+            result.all_objects.append(entry)
+            if entry.is_dir:
+                scan_recurse(entry, result)
+                for child in entry.children:
+                    entry.size += child.size
+                result.total_dirs += 1
+            else:
+                result.total_files += 1
+            result.total_size += entry.size
+        else:
+            print(f"Skipping unsupported object with mode {hex(stats.st_mode)} on '{path}'")
+
+    return result
+
+def update_dict(d: dict, key, entry: Entry):
+    l = d.get(key)
+    if l:
+        l.append(entry)
+    else:
+        d.update([(key, [entry])])
+
+class HashGrouping:
+    def __init__(self, grouping: Dict[bytes, List[Entry]]):
+        self.grouping = grouping
+        self.space_taken_by_duplicates = 0
+        self.duplicate_sets = 0
+        self.duplicate_files = 0
+
+        for _, entries in self.grouping.items():
+            if len(entries) > 1:
+                duplicates = len(entries) - 1 # -1 because one copy should remain.
+                # It can be very safely assumed that the size of each file with same hash is identical.
+                # As of writing this, there is no known SHA-256 collision.
+                self.space_taken_by_duplicates += entries[0].size * duplicates
+                self.duplicate_sets += 1
+                self.duplicate_files += duplicates
+
+    def print_duplicates(self):
+        print("HASH DUPLICATES:")
+        for hash, entries in self.grouping.items():
+            if len(entries) > 1:
+                print(f"\n{to_hex(hash)}") # empty line to separate groups of duplicates
+                for entry in entries:
+                    print(entry)
+
+    def print_stats(self):
+        print("HASH DUPLICATE STATS:")
+        print(f"duplicate sets: {self.duplicate_sets}")
+        print(f"duplicate files: {self.duplicate_files}")
+        print(f"space taken by duplicates: {pretty_byte_size(self.space_taken_by_duplicates)}")
+
+
+class NameGrouping:
+    def __init__(self, grouping: Dict[str, List[Entry]]):
+        self.grouping = grouping
+        # no space_taken_by_duplicates as here each may have a different size
+        # so computing which files contribute to redundant space is impossible
+        self.duplicate_sets = 0
+        self.duplicate_entries = 0
+
+        for _, entries in self.grouping.items():
+            if len(entries) > 1:
+                self.duplicate_sets += 1
+                self.duplicate_entries += len(entries) - 1 # -1 because one copy should remain.
+
+    def print_duplicates(self):
+        print("NAME DUPLICATES:")
+        for name, entries in self.grouping.items():
+            if len(entries) > 1:
+                print(f"\n{name}") # empty line to separate groups of duplicates
+                for entry in entries:
+                    print(entry)
+
+    def print_stats(self):
+        print("NAME DUPLICATE STATS:")
+        print(f"duplicate sets: {self.duplicate_sets}")
+        print(f"duplicate entries: {self.duplicate_entries}")
+
+
+def group_by_name(entries: List[Entry]) -> NameGrouping:
+    result = {}
+    for entry in entries:
+        update_dict(result, entry.name(), entry)
+    return NameGrouping(result)
+
+def group_by_hash(entries: List[Entry]) -> HashGrouping:
+    result = {}
+    for entry in entries:
+        if not entry.is_dir:
+            entry.checksum = sha256sum(entry.path)
+            update_dict(result, entry.checksum, entry)
+    return HashGrouping(result)
+
+def run(by_name: bool, by_hash: bool, paths: List[str]):
+    # step: scan
+    print(f"scanning {len(paths)} root paths for files...")
+    scan_result = scan(paths)
+    print(f"found {len(scan_result.all_objects)} objects totalling {pretty_byte_size(scan_result.total_size)}")
+
+    # step: compute
+    if by_name:
+        # this is very fast
+        name_grouping = group_by_name(scan_result.all_objects)
+    if by_hash:
+        # this grows linearly with size of files
+        # future improvement: compute hashes concurrently
+        print("computing hashes...")
+        hash_grouping = group_by_hash(scan_result.all_objects)
+
+    # step: print duplicates
+    if by_name:
+        print()
+        name_grouping.print_duplicates()
+    if by_hash:
+        print()
+        hash_grouping.print_duplicates()
+
+    # step: print stats
+    print()
+    scan_result.print_stats()
+    if by_name:
+        print()
+        name_grouping.print_stats()
+    if by_hash:
+        print()
+        hash_grouping.print_stats()
 
 if __name__ == "__main__":
-    if len(sys.argv) == 1:
-        print("enter 1 or more paths, both absolute and relative work")
-        exit(1)
-    scan(sys.argv[1:])
+    parser = argparse.ArgumentParser("file deduplicator - scan given places and list duplicates")
+    parser.add_argument("-n", "--name", action="store_true", help="list duplicate files by name")
+    parser.add_argument("-s", "--hash", action="store_true", help="list duplicate files by their SHA-256")
+    parser.add_argument("-d", "--date-sort", action="store_true", help="sort duplicates by date (default: filesystem order)")
+    parser.add_argument("paths", nargs="+", help="file or directory paths to scan, can be relative and absolute")
+    args = parser.parse_args()
+    if args.date_sort:
+        print("warning: date sort not implemented")
+    run(by_name=args.name, by_hash=args.hash, paths=args.paths)
 
 # remove files that have "XYZ" and "XYZ (1)" names
-# printing duplicates - print by discovery order, path (might be the same) or by date
 # prompt for removal if in the same directory?
-# scanning - by name or by cheksum - make it an option
+# printing duplicates - print by discovery order, path (might be the same) or by date
