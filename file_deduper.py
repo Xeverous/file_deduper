@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
 import datetime
-import sys
 import os
 import stat
 from typing import AnyStr, Dict, List, Optional, Union
 from hashlib import sha256
 import argparse
+import progressbar
 
 # https://stackoverflow.com/questions/53418046/how-do-i-type-hint-a-variable-that-can-be-passed-as-the-first-argument-to-open
 def sha256sum(filename: Union[str, bytes, os.PathLike]) -> bytes:
@@ -197,12 +197,22 @@ def group_by_name(entries: List[Entry]) -> NameGrouping:
         update_dict(result, entry.name(), entry)
     return NameGrouping(result)
 
-def group_by_hash(entries: List[Entry]) -> HashGrouping:
+def group_by_hash(entries: List[Entry], total_bytes: int) -> HashGrouping:
     result = {}
+    processed_bytes = 0
+    bar = progressbar.ProgressBar(
+        maxval=total_bytes,
+        widgets=[progressbar.Bar('#', '[', ']'), ' ', progressbar.Percentage()])
+    bar.start()
+
     for entry in entries:
         if not entry.is_dir:
             entry.checksum = sha256sum(entry.path)
             update_dict(result, entry.checksum, entry)
+            processed_bytes += entry.size
+            bar.update(processed_bytes)
+
+    bar.finish()
     return HashGrouping(result)
 
 def run(by_name: bool, by_hash: bool, paths: List[str]):
@@ -219,7 +229,7 @@ def run(by_name: bool, by_hash: bool, paths: List[str]):
         # this grows linearly with size of files
         # future improvement: compute hashes concurrently
         print("computing hashes...")
-        hash_grouping = group_by_hash(scan_result.all_objects)
+        hash_grouping = group_by_hash(scan_result.all_objects, scan_result.total_size)
 
     # step: print duplicates
     if by_name:
