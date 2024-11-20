@@ -108,6 +108,7 @@ class Database:
 
         space_taken_by_duplicates = 0
         duplicate_sets = 0
+        duplicate_files = 0
         print("\n\nduplicate by checksum:")
         for checksum, entries in self.entries_by_checksum.items():
             if len(entries) > 1:
@@ -115,17 +116,19 @@ class Database:
                 for entry in entries:
                     print(entry)
                     space_taken_by_duplicates += entry.size
+                duplicates = len(entries) - 1 # -1 because one copy should remain.
                 # It can be very safely assumed that the size of each file with same hash is identical.
                 # As of writing this, there is no known SHA-256 collision.
-                # -1 because one copy should remain.
-                space_taken_by_duplicates += entries[0].size * (len(entries) - 1)
+                space_taken_by_duplicates += entries[0].size * duplicates
                 duplicate_sets += 1
+                duplicate_files += duplicates
 
         print(f"\n\ntotal dirs: {self.total_dirs}")
         print(f"total files: {self.total_files}")
         print(f"total size: {pretty_byte_size(self.total_size)}")
         print()
         print(f"duplicate sets: {duplicate_sets}")
+        print(f"duplicate files: {duplicate_files}")
         print(f"space taken by duplicates: {pretty_byte_size(space_taken_by_duplicates)}")
 
 
