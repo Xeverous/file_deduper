@@ -54,12 +54,22 @@ class Entry:
     def name(self) -> AnyStr:
         return os.path.basename(self.path)
 
-    def __repr__(self) -> str:
-        # 12 is enough for ~9.1 TiB
-        size = "{:>12}".format(self.size)
+    def to_string(self, pretty_size=False) -> str:
         # removing .strftime() brings default formatting (which also prints second fractions)
         date = datetime.datetime.fromtimestamp(self.date_modified).strftime('%Y-%m-%d %H:%M:%S')
+        if pretty_size:
+            size = "{:>12}".format(pretty_byte_size(self.size))
+        else:
+            # 12 is enough for ~9.1 TiB
+            size = "{:>12}".format(self.size)
         return f"{date} {size} {self.path}"
+
+    def __repr__(self) -> str:
+        return self.to_string()
+
+    def print(self, pretty_size=False):
+        print(self.to_string(pretty_size))
+
 
 def make_entry(parent: Optional[Entry],
                path: Union[str, bytes, os.PathLike],
@@ -152,13 +162,13 @@ class NameGrouping:
                 if order_by_date:
                     sort_by_date(entries)
 
-    def print_duplicates(self):
+    def print_duplicates(self, pretty_size=False):
         print("NAME DUPLICATES:")
         for name, entries in self.grouping.items():
             if len(entries) > 1:
                 print(f"\n{name}") # empty line to separate groups of duplicates
                 for entry in entries:
-                    print(entry)
+                    entry.print(pretty_size)
 
     def print_stats(self):
         print("NAME DUPLICATE STATS:")
@@ -184,13 +194,13 @@ class HashGrouping:
                 if order_by_date:
                     sort_by_date(entries)
 
-    def print_duplicates(self):
+    def print_duplicates(self, pretty_size=False):
         print("HASH DUPLICATES:")
         for hash, entries in self.grouping.items():
             if len(entries) > 1:
                 print(f"\n{to_hex(hash)}") # empty line to separate groups of duplicates
                 for entry in entries:
-                    print(entry)
+                    entry.print(pretty_size)
 
     def print_stats(self):
         print("HASH DUPLICATE STATS:")
@@ -223,7 +233,7 @@ def group_by_hash(entries: List[Entry], total_bytes: int, order_by_date=False) -
     bar.finish()
     return HashGrouping(result, order_by_date)
 
-def run(by_name: bool, by_hash: bool, paths: List[str], order_by_date=False):
+def run(by_name: bool, by_hash: bool, paths: List[str], order_by_date=False, pretty_size=False):
     # step: scan
     print(f"scanning {len(paths)} root paths for files...")
     scan_result = scan(paths)
@@ -242,10 +252,10 @@ def run(by_name: bool, by_hash: bool, paths: List[str], order_by_date=False):
     # step: print duplicates
     if by_name:
         print()
-        name_grouping.print_duplicates()
+        name_grouping.print_duplicates(pretty_size)
     if by_hash:
         print()
-        hash_grouping.print_duplicates()
+        hash_grouping.print_duplicates(pretty_size)
 
     # step: print stats
     print()
@@ -262,9 +272,11 @@ if __name__ == "__main__":
     parser.add_argument("-n", "--name", action="store_true", help="list duplicate files by name")
     parser.add_argument("-s", "--hash", action="store_true", help="list duplicate files by their SHA-256")
     parser.add_argument("-d", "--date-sort", action="store_true", help="sort duplicates by date (default: filesystem order)")
+    parser.add_argument("-p", "--pretty-size", action="store_true", help="pretty print file sizes")
     parser.add_argument("paths", nargs="+", help="file or directory paths to scan, can be relative and absolute")
     args = parser.parse_args()
-    run(by_name=args.name, by_hash=args.hash, paths=args.paths, order_by_date=args.date_sort)
+    run(by_name=args.name, by_hash=args.hash, paths=args.paths,
+        order_by_date=args.date_sort, pretty_size=args.pretty_size)
 
 # autoremove same-hash files that have "XYZ" and "XYZ (1)" names in the same directory?
 
