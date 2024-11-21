@@ -133,8 +133,11 @@ def update_dict(d: dict, key, entry: Entry):
     else:
         d.update([(key, [entry])])
 
+def sort_by_date(l: List[Entry]):
+    l.sort(key=lambda e: e.date_modified)
+
 class HashGrouping:
-    def __init__(self, grouping: Dict[bytes, List[Entry]]):
+    def __init__(self, grouping: Dict[bytes, List[Entry]], order_by_date=False):
         self.grouping = grouping
         self.space_taken_by_duplicates = 0
         self.duplicate_sets = 0
@@ -148,6 +151,8 @@ class HashGrouping:
                 self.space_taken_by_duplicates += entries[0].size * duplicates
                 self.duplicate_sets += 1
                 self.duplicate_files += duplicates
+                if order_by_date:
+                    sort_by_date(entries)
 
     def print_duplicates(self):
         print("HASH DUPLICATES:")
@@ -165,7 +170,7 @@ class HashGrouping:
 
 
 class NameGrouping:
-    def __init__(self, grouping: Dict[str, List[Entry]]):
+    def __init__(self, grouping: Dict[str, List[Entry]], order_by_date=False):
         self.grouping = grouping
         # no space_taken_by_duplicates as here each may have a different size
         # so computing which files contribute to redundant space is impossible
@@ -176,6 +181,8 @@ class NameGrouping:
             if len(entries) > 1:
                 self.duplicate_sets += 1
                 self.duplicate_entries += len(entries) - 1 # -1 because one copy should remain.
+                if order_by_date:
+                    sort_by_date(entries)
 
     def print_duplicates(self):
         print("NAME DUPLICATES:")
@@ -191,13 +198,13 @@ class NameGrouping:
         print(f"duplicate entries: {self.duplicate_entries}")
 
 
-def group_by_name(entries: List[Entry]) -> NameGrouping:
+def group_by_name(entries: List[Entry], order_by_date=False) -> NameGrouping:
     result = {}
     for entry in entries:
         update_dict(result, entry.name(), entry)
-    return NameGrouping(result)
+    return NameGrouping(result, order_by_date)
 
-def group_by_hash(entries: List[Entry], total_bytes: int) -> HashGrouping:
+def group_by_hash(entries: List[Entry], total_bytes: int, order_by_date=False) -> HashGrouping:
     result = {}
     processed_bytes = 0
     bar = progressbar.ProgressBar(
@@ -213,9 +220,9 @@ def group_by_hash(entries: List[Entry], total_bytes: int) -> HashGrouping:
             bar.update(processed_bytes)
 
     bar.finish()
-    return HashGrouping(result)
+    return HashGrouping(result, order_by_date)
 
-def run(by_name: bool, by_hash: bool, paths: List[str]):
+def run(by_name: bool, by_hash: bool, paths: List[str], order_by_date=False):
     # step: scan
     print(f"scanning {len(paths)} root paths for files...")
     scan_result = scan(paths)
@@ -224,12 +231,12 @@ def run(by_name: bool, by_hash: bool, paths: List[str]):
     # step: compute
     if by_name:
         # this is very fast
-        name_grouping = group_by_name(scan_result.all_objects)
+        name_grouping = group_by_name(scan_result.all_objects, order_by_date)
     if by_hash:
         # this grows linearly with size of files
         # future improvement: compute hashes concurrently
         print("computing hashes...")
-        hash_grouping = group_by_hash(scan_result.all_objects, scan_result.total_size)
+        hash_grouping = group_by_hash(scan_result.all_objects, scan_result.total_size, order_by_date)
 
     # step: print duplicates
     if by_name:
@@ -256,10 +263,13 @@ if __name__ == "__main__":
     parser.add_argument("-d", "--date-sort", action="store_true", help="sort duplicates by date (default: filesystem order)")
     parser.add_argument("paths", nargs="+", help="file or directory paths to scan, can be relative and absolute")
     args = parser.parse_args()
-    if args.date_sort:
-        print("warning: date sort not implemented")
-    run(by_name=args.name, by_hash=args.hash, paths=args.paths)
+    run(by_name=args.name, by_hash=args.hash, paths=args.paths, order_by_date=args.date_sort)
 
-# remove files that have "XYZ" and "XYZ (1)" names
-# prompt for removal if in the same directory?
-# printing duplicates - print by discovery order, path (might be the same) or by date
+# autoremove same-hash files that have "XYZ" and "XYZ (1)" names in the same directory?
+
+# interactive mode plan:
+# <num> - file to keep
+# s - skip this set
+# d - skip this directory?
+# q - quit interactive mode, print remaining duplicates
+# ? - help
