@@ -136,6 +136,36 @@ def update_dict(d: dict, key, entry: Entry):
 def sort_by_date(l: List[Entry]):
     l.sort(key=lambda e: e.date_modified)
 
+
+class NameGrouping:
+    def __init__(self, grouping: Dict[str, List[Entry]], order_by_date=False):
+        self.grouping = grouping
+        # no space_taken_by_duplicates as here each may have a different size
+        # so computing which files contribute to redundant space is impossible
+        self.duplicate_sets = 0
+        self.duplicate_entries = 0
+
+        for _, entries in self.grouping.items():
+            if len(entries) > 1:
+                self.duplicate_sets += 1
+                self.duplicate_entries += len(entries) - 1 # -1 because one copy should remain.
+                if order_by_date:
+                    sort_by_date(entries)
+
+    def print_duplicates(self):
+        print("NAME DUPLICATES:")
+        for name, entries in self.grouping.items():
+            if len(entries) > 1:
+                print(f"\n{name}") # empty line to separate groups of duplicates
+                for entry in entries:
+                    print(entry)
+
+    def print_stats(self):
+        print("NAME DUPLICATE STATS:")
+        print(f"duplicate sets: {self.duplicate_sets}")
+        print(f"duplicate entries: {self.duplicate_entries}")
+
+
 class HashGrouping:
     def __init__(self, grouping: Dict[bytes, List[Entry]], order_by_date=False):
         self.grouping = grouping
@@ -167,35 +197,6 @@ class HashGrouping:
         print(f"duplicate sets: {self.duplicate_sets}")
         print(f"duplicate files: {self.duplicate_files}")
         print(f"space taken by duplicates: {pretty_byte_size(self.space_taken_by_duplicates)}")
-
-
-class NameGrouping:
-    def __init__(self, grouping: Dict[str, List[Entry]], order_by_date=False):
-        self.grouping = grouping
-        # no space_taken_by_duplicates as here each may have a different size
-        # so computing which files contribute to redundant space is impossible
-        self.duplicate_sets = 0
-        self.duplicate_entries = 0
-
-        for _, entries in self.grouping.items():
-            if len(entries) > 1:
-                self.duplicate_sets += 1
-                self.duplicate_entries += len(entries) - 1 # -1 because one copy should remain.
-                if order_by_date:
-                    sort_by_date(entries)
-
-    def print_duplicates(self):
-        print("NAME DUPLICATES:")
-        for name, entries in self.grouping.items():
-            if len(entries) > 1:
-                print(f"\n{name}") # empty line to separate groups of duplicates
-                for entry in entries:
-                    print(entry)
-
-    def print_stats(self):
-        print("NAME DUPLICATE STATS:")
-        print(f"duplicate sets: {self.duplicate_sets}")
-        print(f"duplicate entries: {self.duplicate_entries}")
 
 
 def group_by_name(entries: List[Entry], order_by_date=False) -> NameGrouping:
