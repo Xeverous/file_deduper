@@ -45,6 +45,9 @@ def pretty_byte_size(num: int) -> str:
         num /= 1024.0
     return f"{num:.1f} YiB"
 
+def print_separator() -> None:
+    progressbar.ProgressBar(widgets=[progressbar.Bar('_', '_', '_', '_')]).start().finish()
+
 class Entry:
     def __init__(self, parent: "Optional[Entry]",
                  path: Union[str, bytes, os.PathLike],
@@ -391,6 +394,7 @@ class Deduper:
             print("r - reset (use when changes were made outside this program)")
             print("q - quit")
             answer = input()
+            print_separator()
             print()
 
             if answer == "i":
@@ -423,6 +427,7 @@ class Deduper:
                 print("  s   - skip this set")
                 print("  b   - back to previous menu")
                 answer = input()
+                print_separator()
                 idx1 = str_to_int(answer)
                 if idx1 is not None:
                     result, bytes_removed = self.grouping.remove_all_files_except_one(self.scan_result, key, idx1 - 1)
