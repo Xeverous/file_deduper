@@ -3,10 +3,17 @@
 import datetime
 import os
 import stat
-from typing import AnyStr, Dict, List, Optional, Union
+from typing import Any, AnyStr, Dict, List, Optional, Tuple, Union
 from hashlib import sha256
 import argparse
 import progressbar
+from abc import ABC, abstractmethod
+
+def str_to_int(s: str) -> Union[int, None]:
+    try:
+        return int(s)
+    except ValueError:
+        return None
 
 # https://stackoverflow.com/questions/53418046/how-do-i-type-hint-a-variable-that-can-be-passed-as-the-first-argument-to-open
 def sha256sum(filename: Union[str, bytes, os.PathLike]) -> bytes:
@@ -83,11 +90,18 @@ def make_entry(parent: Optional[Entry],
 
 class ScanResult:
     def __init__(self):
-        self.root_objects: list[Entry] = []
-        self.all_objects:  list[Entry] = []
+        self.root_objects: List[Entry] = []
+        self.all_objects:  Dict[str, Entry] = {} # key is path, for easy removal
         self.total_dirs  = 0
         self.total_files = 0
         self.total_size  = 0
+
+    def remove_entry(self, path: str):
+        size = self.all_objects[path].size
+        self.root_objects = [ x for x in self.root_objects if path != x.path ]
+        del self.all_objects[path]
+        self.total_files -= 1
+        self.total_size -= size
 
     def print_stats(self):
         print("OVERALL STATS:")
@@ -103,7 +117,7 @@ def scan_recurse(parent: Entry, result: ScanResult):
         if stat.S_ISDIR(stats.st_mode) or stat.S_ISREG(stats.st_mode):
             entry = make_entry(parent, path, stats)
             parent.children.append(entry)
-            result.all_objects.append(entry)
+            result.all_objects.update([(path, entry)])
             if entry.is_dir:
                 scan_recurse(entry, result)
                 for child in entry.children:
@@ -122,7 +136,7 @@ def scan(paths: List[Union[str, bytes, os.PathLike]]) -> ScanResult:
         if stat.S_ISREG(stats.st_mode) or stat.S_ISDIR(stats.st_mode):
             entry = make_entry(None, path, stats)
             result.root_objects.append(entry)
-            result.all_objects.append(entry)
+            result.all_objects.update([(path, entry)])
             if entry.is_dir:
                 scan_recurse(entry, result)
                 for child in entry.children:
@@ -136,7 +150,7 @@ def scan(paths: List[Union[str, bytes, os.PathLike]]) -> ScanResult:
 
     return result
 
-def update_dict(d: dict, key, entry: Entry):
+def update_dict(d: dict, key, entry: Entry) -> None:
     l = d.get(key)
     if l:
         l.append(entry)
@@ -146,76 +160,158 @@ def update_dict(d: dict, key, entry: Entry):
 def sort_by_date(l: List[Entry]):
     l.sort(key=lambda e: e.date_modified)
 
+class Grouping(ABC):
+    @abstractmethod
+    def grouping(self) -> Dict[Any, List[Entry]]:
+        pass
 
-class NameGrouping:
+    def keys_to_duplicate_sets(self) -> list:
+        result = []
+        for key, val in self.grouping().items():
+            if len(val) > 1:
+                result.append(key)
+        return result
+
+    @abstractmethod
+    # key from the list obtained from keys_to_duplicate_sets
+    def print_set(self, key, pretty_size=False, numerate=False) -> None:
+        pass
+
+    @abstractmethod
+    def print_duplicates(self, pretty_size=False) -> None:
+        pass
+
+    @abstractmethod
+    def print_stats(self) -> None:
+        pass
+
+    @staticmethod
+    def print_set(header: str, entries: List[Entry], pretty_size=False, numerate=False) -> None:
+        print(f"\n{header}") # empty line to separate groups of duplicates
+        if numerate:
+            for idx, entry in enumerate(entries):
+                print(f"[{idx + 1}]: ", end="")
+                entry.print(pretty_size=True)
+        else:
+            for entry in entries:
+                entry.print(pretty_size)
+
+    # Returns whether operation succeeded and the total size of removed files.
+    # It is possible to have False with non-zero values on partial success.
+    def remove_all_files_except_one(self, scan_result: ScanResult, key, idx: int) -> Tuple[bool, int]:
+        entries = self.grouping()[key]
+
+        if idx not in range(len(entries)):
+            print("Error: invalid index")
+            return False, 0
+
+        remaining_entries = []
+        result = True
+        bytes_removed = 0
+
+        for i, entry in enumerate(entries):
+            if i == idx:
+                continue
+            try:
+                os.remove(entry.path)
+                bytes_removed += entry.size
+                scan_result.remove_entry(entry.path)
+                print(f"Removed {entry.path} ({pretty_byte_size(entry.size)})")
+            except OSError as e:
+                remaining_entries.append(entry)
+                print(f"Error when removing \"{entry.path}\": {e.strerror}")
+                result = False
+        self.grouping()[key] = remaining_entries
+        return result, bytes_removed
+
+class NameGrouping(Grouping):
     def __init__(self, grouping: Dict[str, List[Entry]], order_by_date=False):
-        self.grouping = grouping
-        # no space_taken_by_duplicates as here each may have a different size
-        # so computing which files contribute to redundant space is impossible
-        self.duplicate_sets = 0
-        self.duplicate_entries = 0
+        self._grouping = grouping
+        if order_by_date:
+            for entries in self._grouping.values():
+                sort_by_date(entries)
 
-        for _, entries in self.grouping.items():
-            if len(entries) > 1:
-                self.duplicate_sets += 1
-                self.duplicate_entries += len(entries) - 1 # -1 because one copy should remain.
-                if order_by_date:
-                    sort_by_date(entries)
+    def grouping(self) -> Dict[Any, List[Entry]]:
+        return self._grouping
 
-    def print_duplicates(self, pretty_size=False):
-        print("NAME DUPLICATES:")
-        for name, entries in self.grouping.items():
-            if len(entries) > 1:
-                print(f"\n{name}") # empty line to separate groups of duplicates
-                for entry in entries:
-                    entry.print(pretty_size)
+    def compute_stats(self) -> Tuple[int, int]:
+        duplicate_sets = 0
+        duplicate_entries = 0
 
-    def print_stats(self):
-        print("NAME DUPLICATE STATS:")
-        print(f"duplicate sets: {self.duplicate_sets}")
-        print(f"duplicate entries: {self.duplicate_entries}")
-
-
-class HashGrouping:
-    def __init__(self, grouping: Dict[bytes, List[Entry]], order_by_date=False):
-        self.grouping = grouping
-        self.space_taken_by_duplicates = 0
-        self.duplicate_sets = 0
-        self.duplicate_files = 0
-
-        for _, entries in self.grouping.items():
+        for entries in self._grouping.values():
             if len(entries) > 1:
                 duplicates = len(entries) - 1 # -1 because one copy should remain.
+                duplicate_sets += 1
+                duplicate_entries += duplicates
+                # no space_taken_by_duplicates as here each may have a different size
+                # so computing which files contribute to redundant space is impossible
+
+        return duplicate_sets, duplicate_entries
+
+    def print_set(self, key: str, pretty_size=False, numerate=False) -> None:
+        Grouping.print_set(key, self._grouping[key], pretty_size, numerate)
+
+    def print_duplicates(self, pretty_size=False) -> None:
+        print("NAME DUPLICATES:")
+        for key in self.keys_to_duplicate_sets():
+            self.print_set(key, pretty_size=pretty_size)
+
+    def print_stats(self) -> None:
+        print("NAME DUPLICATE STATS:")
+        duplicate_sets, duplicate_entries = self.compute_stats()
+        print(f"duplicate sets: {duplicate_sets}")
+        print(f"duplicate entries: {duplicate_entries}")
+
+
+class HashGrouping(Grouping):
+    def __init__(self, grouping: Dict[bytes, List[Entry]], order_by_date=False):
+        self._grouping = grouping
+
+        if order_by_date:
+            for entries in self._grouping.values():
+                sort_by_date(entries)
+
+    def grouping(self) -> Dict[Any, List[Entry]]:
+        return self._grouping
+
+    def compute_stats(self) -> Tuple[int, int, int]:
+        duplicate_sets = 0
+        duplicate_files = 0 # not duplicate_entries because hashes are computed only for files
+        space_taken_by_duplicates = 0
+
+        for _, entries in self._grouping.items():
+            if len(entries) > 1:
+                duplicates = len(entries) - 1 # -1 because one copy should remain.
+                duplicate_sets += 1
+                duplicate_files += duplicates
                 # It can be very safely assumed that the size of each file with same hash is identical.
                 # As of writing this, there is no known SHA-256 collision.
-                self.space_taken_by_duplicates += entries[0].size * duplicates
-                self.duplicate_sets += 1
-                self.duplicate_files += duplicates
-                if order_by_date:
-                    sort_by_date(entries)
+                space_taken_by_duplicates += entries[0].size * duplicates
+        return duplicate_sets, duplicate_files, space_taken_by_duplicates
+
+    def print_set(self, key: bytes, pretty_size=False, numerate=False):
+        Grouping.print_set(to_hex(key), self._grouping[key], pretty_size, numerate)
 
     def print_duplicates(self, pretty_size=False):
         print("HASH DUPLICATES:")
-        for hash, entries in self.grouping.items():
-            if len(entries) > 1:
-                print(f"\n{to_hex(hash)}") # empty line to separate groups of duplicates
-                for entry in entries:
-                    entry.print(pretty_size)
+        for key in self.keys_to_duplicate_sets():
+            self.print_set(key, pretty_size=pretty_size)
 
     def print_stats(self):
         print("HASH DUPLICATE STATS:")
-        print(f"duplicate sets: {self.duplicate_sets}")
-        print(f"duplicate files: {self.duplicate_files}")
-        print(f"space taken by duplicates: {pretty_byte_size(self.space_taken_by_duplicates)}")
+        duplicate_sets, duplicate_files, space_taken_by_duplicates = self.compute_stats()
+        print(f"duplicate sets: {duplicate_sets}")
+        print(f"duplicate files: {duplicate_files}")
+        print(f"space taken by duplicates: {pretty_byte_size(space_taken_by_duplicates)}")
 
 
-def group_by_name(entries: List[Entry], order_by_date=False) -> NameGrouping:
+def group_by_name(entries: Dict[str, Entry], order_by_date=False) -> NameGrouping:
     result = {}
-    for entry in entries:
+    for entry in entries.values():
         update_dict(result, entry.name(), entry)
     return NameGrouping(result, order_by_date)
 
-def group_by_hash(entries: List[Entry], total_bytes: int, order_by_date=False) -> HashGrouping:
+def group_by_hash(entries: Dict[str, Entry], total_bytes: int, order_by_date=False) -> HashGrouping:
     result = {}
     processed_bytes = 0
     bar = progressbar.ProgressBar(
@@ -223,7 +319,7 @@ def group_by_hash(entries: List[Entry], total_bytes: int, order_by_date=False) -
         widgets=[progressbar.Bar('#', '[', ']'), ' ', progressbar.Percentage()])
     bar.start()
 
-    for entry in entries:
+    for entry in entries.values():
         if not entry.is_dir:
             entry.checksum = sha256sum(entry.path)
             update_dict(result, entry.checksum, entry)
@@ -233,56 +329,131 @@ def group_by_hash(entries: List[Entry], total_bytes: int, order_by_date=False) -
     bar.finish()
     return HashGrouping(result, order_by_date)
 
-def run(by_name: bool, by_hash: bool, paths: List[str], order_by_date=False, pretty_size=False):
-    # step: scan
-    print(f"scanning {len(paths)} root paths for files...")
-    scan_result = scan(paths)
-    print(f"found {len(scan_result.all_objects)} objects totalling {pretty_byte_size(scan_result.total_size)}")
+class Deduper:
+    def __init__(self, paths: List[str], order_by_date=False):
+        self.paths = paths
+        self.order_by_date = order_by_date
+        self.removed_files_size = 0
+        self.scan()
 
-    # step: compute
-    if by_name:
-        # this is very fast
-        name_grouping = group_by_name(scan_result.all_objects, order_by_date)
-    if by_hash:
-        # this grows linearly with size of files
-        # future improvement: compute hashes concurrently
-        print("computing hashes...")
-        hash_grouping = group_by_hash(scan_result.all_objects, scan_result.total_size, order_by_date)
+    def scan(self):
+        # Note: there can only be grouping at a time.
+        # This is because file removal on one grouping will invalidate another.
+        # This is also why removal needs to update scan_result
+        self.grouping = None
+        print(f"scanning {len(self.paths)} root paths for files...")
+        self.scan_result = scan(self.paths)
+        print(f"found {len(self.scan_result.all_objects)} objects totalling {pretty_byte_size(self.scan_result.total_size)}")
 
-    # step: print duplicates
-    if by_name:
-        print()
-        name_grouping.print_duplicates(pretty_size)
-    if by_hash:
-        print()
-        hash_grouping.print_duplicates(pretty_size)
+    def search_name_duplicates(self):
+        if not isinstance(self.grouping, NameGrouping):
+            self.grouping = group_by_name(self.scan_result.all_objects, self.order_by_date)
 
-    # step: print stats
-    print()
-    scan_result.print_stats()
-    if by_name:
+    def search_hash_duplicates(self):
+        if not isinstance(self.grouping, HashGrouping):
+            # this grows linearly with size of files
+            # future improvement: compute hashes concurrently
+            print("computing hashes...")
+            self.grouping = group_by_hash(self.scan_result.all_objects, self.scan_result.total_size, self.order_by_date)
+
+    def print_duplicates(self, pretty_size=False):
+        if self.grouping:
+            print()
+            self.grouping.print_duplicates(pretty_size)
+
+    def print_stats(self):
         print()
-        name_grouping.print_stats()
-    if by_hash:
-        print()
-        hash_grouping.print_stats()
+        self.scan_result.print_stats()
+        # this stat is only for interactive mode and thus should only be printed if modified
+        if self.removed_files_size != 0:
+            print(f"removed files size: {pretty_byte_size(self.removed_files_size)}")
+        if self.grouping:
+            print()
+            self.grouping.print_stats()
+
+    def run(self, by_name=False, by_hash=False, pretty_size=False):
+        if by_name:
+            self.search_name_duplicates()
+            self.print_duplicates(pretty_size)
+            self.print_stats()
+        if by_hash:
+            self.search_hash_duplicates()
+            self.print_duplicates(pretty_size)
+            self.print_stats()
+
+    def run_interactive(self):
+        while True:
+            print("\nINTERACTIVE MODE")
+            print("i - print command-line parameters given on launch")
+            print("s - print stats")
+            print("n - interactively remove name duplicates")
+            print("h - interactively remove hash duplicates")
+            print("r - reset (use when changes were made outside this program)")
+            print("q - quit")
+            answer = input()
+            print()
+
+            if answer == "i":
+                print(f"\norder by date: {self.order_by_date}")
+                print("paths:")
+                for path in self.paths:
+                    print(path)
+            elif answer == "s":
+                self.print_stats()
+            elif answer == "n":
+                self.search_name_duplicates()
+                self.run_interactive_duplicates()
+            elif answer == "h":
+                self.search_hash_duplicates()
+                self.run_interactive_duplicates()
+            elif answer == "r":
+                self.scan()
+            elif answer == "q":
+                break
+
+    def run_interactive_duplicates(self):
+        self.grouping.print_stats()
+        duplicate_set_keys = self.grouping.keys_to_duplicate_sets()
+        total_sets = len(duplicate_set_keys)
+        for idx0, key in enumerate(duplicate_set_keys):
+            while True:
+                self.grouping.print_set(key, pretty_size=True, numerate=True)
+                print(f"\nINTERACTIVE REMOVAL (set {idx0 + 1}/{total_sets})")
+                print("<num> - keep this file, remove others")
+                print("  s   - skip this set")
+                print("  b   - back to previous menu")
+                answer = input()
+                idx1 = str_to_int(answer)
+                if idx1 is not None:
+                    result, bytes_removed = self.grouping.remove_all_files_except_one(self.scan_result, key, idx1 - 1)
+                    self.removed_files_size += bytes_removed
+                    if result:
+                        break
+                if answer == "s":
+                    break
+                elif answer == "b":
+                    return
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser("file deduplicator - scan given places and list duplicates")
-    parser.add_argument("-n", "--name", action="store_true", help="list duplicate files by name")
-    parser.add_argument("-s", "--hash", action="store_true", help="list duplicate files by their SHA-256")
-    parser.add_argument("-d", "--date-sort", action="store_true", help="sort duplicates by date (default: filesystem order)")
-    parser.add_argument("-p", "--pretty-size", action="store_true", help="pretty print file sizes")
+    parser = argparse.ArgumentParser("file_deduper.py", description="file deduplicator - scan given places and list duplicates")
     parser.add_argument("paths", nargs="+", help="file or directory paths to scan, can be relative and absolute")
+
+    processing_options = parser.add_argument_group("processing options")
+    processing_options.add_argument("-n", "--name", action="store_true", help="list duplicate files by name")
+    processing_options.add_argument("-s", "--hash", action="store_true", help="list duplicate files by their SHA-256")
+    processing_options.add_argument("-i", "--interactive", action="store_true", help="interactive mode (overrides other processing options and applies -p)")
+
+    formatting_options = parser.add_argument_group("formatting options")
+    formatting_options.add_argument("-d", "--date-sort", action="store_true", help="order duplicates by date (default: filesystem order)")
+    formatting_options.add_argument("-p", "--pretty-size", action="store_true", help="pretty print file sizes on duplicate listings (default: bytes)")
+
     args = parser.parse_args()
-    run(by_name=args.name, by_hash=args.hash, paths=args.paths,
-        order_by_date=args.date_sort, pretty_size=args.pretty_size)
+
+    deduper = Deduper(paths=args.paths, order_by_date=args.date_sort)
+    if (args.interactive):
+        deduper.run_interactive()
+    else:
+        deduper.run(args.name, args.hash, args.pretty_size)
 
 # autoremove same-hash files that have "XYZ" and "XYZ (1)" names in the same directory?
-
-# interactive mode plan:
-# <num> - file to keep
-# s - skip this set
-# d - skip this directory?
-# q - quit interactive mode, print remaining duplicates
-# ? - help
