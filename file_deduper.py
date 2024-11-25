@@ -201,10 +201,11 @@ class Grouping(ABC):
 
     # Returns whether operation succeeded and the total size of removed files.
     # It is possible to have False with non-zero values on partial success.
-    def remove_all_files_except_one(self, scan_result: ScanResult, key, idx: int) -> Tuple[bool, int]:
+    # if idx is None, then remove all files
+    def remove_all_files_except(self, scan_result: ScanResult, key, idx: Optional[int]) -> Tuple[bool, int]:
         entries = self.grouping()[key]
 
-        if idx not in range(len(entries)):
+        if idx is not None and idx not in range(len(entries)):
             print("Error: invalid index")
             return False, 0
 
@@ -422,15 +423,23 @@ class Deduper:
         for idx0, key in enumerate(duplicate_set_keys):
             while True:
                 self.grouping.print_set(key, pretty_size=True, numerate=True)
+                # print 1-based index for the user
                 print(f"\nINTERACTIVE REMOVAL (set {idx0 + 1}/{total_sets})")
+                print("  0   - keep none of these files, remove all")
                 print("<num> - keep this file, remove others")
-                print("  s   - skip this set")
+                print("  s   - keep all of these files (skip this set)")
                 print("  b   - back to previous menu")
                 answer = input()
                 print_separator()
                 idx1 = str_to_int(answer)
                 if idx1 is not None:
-                    result, bytes_removed = self.grouping.remove_all_files_except_one(self.scan_result, key, idx1 - 1)
+                    if idx1 == 0:
+                        # if user choose 0 then it means none of the files should be kept
+                        delete_idx = None
+                    else:
+                        # if not 0, then convert 1-based index to 0-based index
+                        delete_idx = idx1 - 1
+                    result, bytes_removed = self.grouping.remove_all_files_except(self.scan_result, key, delete_idx)
                     self.removed_files_size += bytes_removed
                     if result:
                         break
