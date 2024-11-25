@@ -2,12 +2,23 @@
 
 import datetime
 import os
+import re
 import stat
 from typing import Any, AnyStr, Dict, List, Optional, Tuple, Union
 from hashlib import sha256
 import argparse
 import progressbar
 from abc import ABC, abstractmethod
+
+def read_file(path: str) -> str:
+    with open(path, 'r', encoding="utf-8") as file:
+        return file.read()
+
+def matches_any_regex(s: str, regexes: List[re.Pattern]) -> bool:
+    for regex in regexes:
+        if regex.search(s):
+            return True
+    return False
 
 def str_to_int(s: str) -> Union[int, None]:
     try:
@@ -113,16 +124,18 @@ class ScanResult:
         print(f"total size: {pretty_byte_size(self.total_size)}")
 
 # parent must be a directory
-def scan_recurse(parent: Entry, result: ScanResult):
+def scan_recurse(parent: Entry, exclude_regexes: List[re.Pattern], result: ScanResult):
     for name in os.listdir(parent.path):
         path = os.path.join(parent.path, name)
+        if matches_any_regex(path, exclude_regexes):
+            continue
         stats = os.lstat(path)
         if stat.S_ISDIR(stats.st_mode) or stat.S_ISREG(stats.st_mode):
             entry = make_entry(parent, path, stats)
             parent.children.append(entry)
             result.all_objects.update([(path, entry)])
             if entry.is_dir:
-                scan_recurse(entry, result)
+                scan_recurse(entry, exclude_regexes, result)
                 for child in entry.children:
                     entry.size += child.size
                 result.total_dirs += 1
@@ -131,17 +144,19 @@ def scan_recurse(parent: Entry, result: ScanResult):
         else:
             print(f"Skipping unsupported object with mode {hex(stats.st_mode)} on '{path}'")
 
-def scan(paths: List[Union[str, bytes, os.PathLike]]) -> ScanResult:
+def scan(paths: List[Union[str, bytes, os.PathLike]], exclude_regexes: List[re.Pattern] = []) -> ScanResult:
     result = ScanResult()
 
     for path in paths:
+        if matches_any_regex(path, exclude_regexes):
+            continue
         stats = os.lstat(path)
         if stat.S_ISREG(stats.st_mode) or stat.S_ISDIR(stats.st_mode):
             entry = make_entry(None, path, stats)
             result.root_objects.append(entry)
             result.all_objects.update([(path, entry)])
             if entry.is_dir:
-                scan_recurse(entry, result)
+                scan_recurse(entry, exclude_regexes, result)
                 for child in entry.children:
                     entry.size += child.size
                 result.total_dirs += 1
@@ -334,8 +349,9 @@ def group_by_hash(entries: Dict[str, Entry], total_bytes: int, order_by_date=Fal
     return HashGrouping(result, order_by_date)
 
 class Deduper:
-    def __init__(self, paths: List[str], order_by_date=False):
+    def __init__(self, paths: List[str], exclude_regexes: List[re.Pattern] = [], order_by_date=False):
         self.paths = paths
+        self.exclude_regexes = exclude_regexes
         self.order_by_date = order_by_date
         self.removed_files_size = 0
         self.scan()
@@ -346,7 +362,7 @@ class Deduper:
         # This is also why removal needs to update scan_result
         self.grouping = None
         print(f"scanning {len(self.paths)} root paths for files...")
-        self.scan_result = scan(self.paths)
+        self.scan_result = scan(self.paths, self.exclude_regexes)
         print(f"found {len(self.scan_result.all_objects)} objects totalling {pretty_byte_size(self.scan_result.total_size)}")
 
     def search_name_duplicates(self):
@@ -385,6 +401,15 @@ class Deduper:
             self.print_duplicates(pretty_size)
             self.print_stats()
 
+    def print_parameters(self) -> None:
+        print(f"\norder by date: {self.order_by_date}")
+        print("\npaths:")
+        for path in self.paths:
+            print(path)
+        print("\nexclusions:")
+        for regex in self.exclude_regexes:
+            print(regex.pattern)
+
     def run_interactive(self):
         while True:
             print("\nINTERACTIVE MODE")
@@ -399,10 +424,7 @@ class Deduper:
             print()
 
             if answer == "i":
-                print(f"\norder by date: {self.order_by_date}")
-                print("paths:")
-                for path in self.paths:
-                    print(path)
+                self.print_parameters()
             elif answer == "s":
                 self.print_stats()
             elif answer == "n":
@@ -453,6 +475,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser("file_deduper.py", description="file deduplicator - scan given places and list duplicates")
     parser.add_argument("paths", nargs="+", help="file or directory paths to scan, can be relative and absolute")
 
+    scaning_options = parser.add_argument_group("scanning options")
+    scaning_options.add_argument("-r", "--regex-exclude", help="ignore paths matching specified regex")
+    scaning_options.add_argument("-f", "--regex-exclude-file", help="like -r, but read regexes from file, one per line, empty lines are ignored")
+
     processing_options = parser.add_argument_group("processing options")
     processing_options.add_argument("-n", "--name", action="store_true", help="list duplicate files by name")
     processing_options.add_argument("-s", "--hash", action="store_true", help="list duplicate files by their SHA-256")
@@ -464,7 +490,17 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    deduper = Deduper(paths=args.paths, order_by_date=args.date_sort)
+    if args.regex_exclude_file:
+        regexes = read_file(args.regex_exclude_file).splitlines()
+    if args.regex_exclude:
+        regexes.append(args.regex_exclude)
+
+    compiled_regexes = []
+    for regex in regexes:
+        if regex != "":
+            compiled_regexes.append(re.compile(regex))
+
+    deduper = Deduper(args.paths, compiled_regexes, args.date_sort)
     if (args.interactive):
         deduper.run_interactive()
     else:
