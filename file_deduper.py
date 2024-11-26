@@ -490,6 +490,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    regexes = []
     if args.regex_exclude_file:
         regexes = read_file(args.regex_exclude_file).splitlines()
     if args.regex_exclude:
