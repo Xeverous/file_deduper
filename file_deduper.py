@@ -26,6 +26,15 @@ def str_to_int(s: str) -> Union[int, None]:
     except ValueError:
         return None
 
+def is_in_range(value: int, min_value: Optional[int] = None, max_value: Optional[int] = None) -> bool:
+    if min_value is not None:
+        if value < min_value:
+            return False
+    if max_value is not None:
+        if value > max_value:
+            return False
+    return True
+
 # https://stackoverflow.com/questions/53418046/how-do-i-type-hint-a-variable-that-can-be-passed-as-the-first-argument-to-open
 def sha256sum(filename: Union[str, bytes, os.PathLike]) -> bytes:
     hash = sha256()
@@ -124,18 +133,23 @@ class ScanResult:
         print(f"total size: {pretty_byte_size(self.total_size)}")
 
 # parent must be a directory
-def scan_recurse(parent: Entry, exclude_regexes: List[re.Pattern], result: ScanResult):
+def scan_recurse(parent: Entry, exclude_regexes: List[re.Pattern],
+                 min_size: Optional[int],
+                 max_size: Optional[int],
+                 result: ScanResult):
     for name in os.listdir(parent.path):
         path = os.path.join(parent.path, name)
         if matches_any_regex(path, exclude_regexes):
             continue
         stats = os.lstat(path)
+        if stat.S_ISREG(stats.st_mode) and not is_in_range(stats.st_size, min_size, max_size):
+            continue
         if stat.S_ISDIR(stats.st_mode) or stat.S_ISREG(stats.st_mode):
             entry = make_entry(parent, path, stats)
             parent.children.append(entry)
             result.all_objects.update([(path, entry)])
             if entry.is_dir:
-                scan_recurse(entry, exclude_regexes, result)
+                scan_recurse(entry, exclude_regexes, min_size, max_size, result)
                 for child in entry.children:
                     entry.size += child.size
                 result.total_dirs += 1
@@ -144,19 +158,24 @@ def scan_recurse(parent: Entry, exclude_regexes: List[re.Pattern], result: ScanR
         else:
             print(f"Skipping unsupported object with mode {hex(stats.st_mode)} on '{path}'")
 
-def scan(paths: List[Union[str, bytes, os.PathLike]], exclude_regexes: List[re.Pattern] = []) -> ScanResult:
+def scan(paths: List[Union[str, bytes, os.PathLike]],
+         exclude_regexes: List[re.Pattern] = [],
+         min_size: Optional[int] = None,
+         max_size: Optional[int] = None) -> ScanResult:
     result = ScanResult()
 
     for path in paths:
         if matches_any_regex(path, exclude_regexes):
             continue
         stats = os.lstat(path)
+        if stat.S_ISREG(stats.st_mode) and not is_in_range(stats.st_size, min_size, max_size):
+            continue
         if stat.S_ISREG(stats.st_mode) or stat.S_ISDIR(stats.st_mode):
             entry = make_entry(None, path, stats)
             result.root_objects.append(entry)
             result.all_objects.update([(path, entry)])
             if entry.is_dir:
-                scan_recurse(entry, exclude_regexes, result)
+                scan_recurse(entry, exclude_regexes, min_size, max_size, result)
                 for child in entry.children:
                     entry.size += child.size
                 result.total_dirs += 1
@@ -349,9 +368,12 @@ def group_by_hash(entries: Dict[str, Entry], total_bytes: int, order_by_date=Fal
     return HashGrouping(result, order_by_date)
 
 class Deduper:
-    def __init__(self, paths: List[str], exclude_regexes: List[re.Pattern] = [], order_by_date=False):
+    def __init__(self, paths: List[str], exclude_regexes: List[re.Pattern] = [],
+                 min_size: int = None, max_size: int = None, order_by_date=False):
         self.paths = paths
         self.exclude_regexes = exclude_regexes
+        self.min_size = min_size
+        self.max_size = max_size
         self.order_by_date = order_by_date
         self.removed_files_size = 0
         self.scan()
@@ -362,7 +384,7 @@ class Deduper:
         # This is also why removal needs to update scan_result
         self.grouping = None
         print(f"scanning {len(self.paths)} root paths for files...")
-        self.scan_result = scan(self.paths, self.exclude_regexes)
+        self.scan_result = scan(self.paths, self.exclude_regexes, self.min_size, self.max_size)
         print(f"found {len(self.scan_result.all_objects)} objects totalling {pretty_byte_size(self.scan_result.total_size)}")
 
     def search_name_duplicates(self):
@@ -402,6 +424,7 @@ class Deduper:
             self.print_stats()
 
     def print_parameters(self) -> None:
+        print(f"\nmin/max size: {self.min_size}/{self.max_size}")
         print(f"\norder by date: {self.order_by_date}")
         print("\npaths:")
         for path in self.paths:
@@ -478,6 +501,8 @@ if __name__ == "__main__":
     scaning_options = parser.add_argument_group("scanning options")
     scaning_options.add_argument("-r", "--regex-exclude", nargs="*", help="ignore paths matching specified regex(es)")
     scaning_options.add_argument("-f", "--regex-exclude-file", help="like -r, but read regexes from file, one per line, empty lines are ignored")
+    scaning_options.add_argument("-m", "--min-size", type=int, default=None, help="minimum required file size in bytes")
+    scaning_options.add_argument("-x", "--max-size", type=int, default=None, help="maximum allowed file size in bytes")
 
     processing_options = parser.add_argument_group("processing options")
     processing_options.add_argument("-n", "--name", action="store_true", help="list duplicate files by name")
@@ -501,7 +526,7 @@ if __name__ == "__main__":
         if regex != "":
             compiled_regexes.append(re.compile(regex))
 
-    deduper = Deduper(args.paths, compiled_regexes, args.date_sort)
+    deduper = Deduper(args.paths, compiled_regexes, args.min_size, args.max_size, args.date_sort)
     if (args.interactive):
         deduper.run_interactive()
     else:
