@@ -476,7 +476,7 @@ if __name__ == "__main__":
     parser.add_argument("paths", nargs="+", help="file or directory paths to scan, can be relative and absolute")
 
     scaning_options = parser.add_argument_group("scanning options")
-    scaning_options.add_argument("-r", "--regex-exclude", help="ignore paths matching specified regex")
+    scaning_options.add_argument("-r", "--regex-exclude", nargs="*", help="ignore paths matching specified regex(es)")
     scaning_options.add_argument("-f", "--regex-exclude-file", help="like -r, but read regexes from file, one per line, empty lines are ignored")
 
     processing_options = parser.add_argument_group("processing options")
@@ -493,8 +493,8 @@ if __name__ == "__main__":
     regexes = []
     if args.regex_exclude_file:
         regexes = read_file(args.regex_exclude_file).splitlines()
-    if args.regex_exclude:
-        regexes.append(args.regex_exclude)
+    for regex in args.regex_exclude:
+        regexes.append(regex)
 
     compiled_regexes = []
     for regex in regexes:
