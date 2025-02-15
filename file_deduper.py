@@ -499,7 +499,7 @@ if __name__ == "__main__":
     parser.add_argument("paths", nargs="+", help="file or directory paths to scan, can be relative and absolute")
 
     scaning_options = parser.add_argument_group("scanning options")
-    scaning_options.add_argument("-r", "--regex-exclude", nargs="*", help="ignore paths matching specified regex(es)")
+    scaning_options.add_argument("-r", "--regex-exclude", nargs="*", default=[], help="ignore paths matching specified regex(es)")
     scaning_options.add_argument("-f", "--regex-exclude-file", help="like -r, but read regexes from file, one per line, empty lines are ignored")
     scaning_options.add_argument("-m", "--min-size", type=int, default=None, help="minimum required file size in bytes")
     scaning_options.add_argument("-x", "--max-size", type=int, default=None, help="maximum allowed file size in bytes")
