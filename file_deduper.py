@@ -480,11 +480,11 @@ class Deduper:
                 if idx1 is not None:
                     if idx1 == 0:
                         # if user choose 0 then it means none of the files should be kept
-                        delete_idx = None
+                        keep_idx = None
                     else:
                         # if not 0, then convert 1-based index to 0-based index
-                        delete_idx = idx1 - 1
-                    result, bytes_removed = self.grouping.remove_all_files_except(self.scan_result, key, delete_idx)
+                        keep_idx = idx1 - 1
+                    result, bytes_removed = self.grouping.remove_all_files_except(self.scan_result, key, keep_idx)
                     self.removed_files_size += bytes_removed
                     if result:
                         break
