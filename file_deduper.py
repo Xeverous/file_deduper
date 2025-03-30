@@ -262,6 +262,44 @@ class Grouping(ABC):
         self.grouping()[key] = remaining_entries
         return result, bytes_removed
 
+    def move_2_to_1(self, scan_result: ScanResult, key, idx: Optional[int]) -> Tuple[bool, int]:
+        entries = self.grouping()[key]
+
+        if idx is not None and idx not in range(len(entries)):
+            print("Error: invalid index")
+            return False, 0
+
+        remaining_entries = []
+        result = True
+        bytes_removed = 0
+
+        entry = entries[0]
+        try:
+            entry0_path = entry.path
+            os.remove(entry.path)
+            bytes_removed += entry.size
+            scan_result.remove_entry(entry.path)
+            print(f"Removed {entry.path} ({pretty_byte_size(entry.size)})")
+            x = input()
+        except OSError as e:
+            remaining_entries.append(entry)
+            print(f"Error when removing \"{entry.path}\": {e.strerror}")
+            return False, 0
+
+        entry = entries[1]
+        try:
+            os.rename(entry.path, entry0_path)
+            scan_result.remove_entry(entry.path)
+            print(f"moved {entry.path} to {entry0_path} ({pretty_byte_size(entry.size)})")
+            x = input()
+        except OSError as e:
+            remaining_entries.append(entry)
+            print(f"Error when moving \"{entry.path}\" to \"{entry0_path}\": {e.strerror}")
+            return False, bytes_removed
+
+        self.grouping()[key] = remaining_entries
+        return result, bytes_removed
+
 class NameGrouping(Grouping):
     def __init__(self, grouping: Dict[str, List[Entry]], order_by_date=False):
         self._grouping = grouping
@@ -481,11 +519,17 @@ class Deduper:
                     if idx1 == 0:
                         # if user choose 0 then it means none of the files should be kept
                         keep_idx = None
+                        result, bytes_removed = self.grouping.remove_all_files_except(self.scan_result, key, keep_idx)
+                        self.removed_files_size += bytes_removed
+                    elif idx1 < 0:
+                        keep_idx = -idx1 - 1
+                        result, bytes_removed = self.grouping.move_2_to_1(self.scan_result, key, keep_idx)
+                        self.removed_files_size += bytes_removed
                     else:
                         # if not 0, then convert 1-based index to 0-based index
                         keep_idx = idx1 - 1
-                    result, bytes_removed = self.grouping.remove_all_files_except(self.scan_result, key, keep_idx)
-                    self.removed_files_size += bytes_removed
+                        result, bytes_removed = self.grouping.remove_all_files_except(self.scan_result, key, keep_idx)
+                        self.removed_files_size += bytes_removed
                     if result:
                         break
                 if answer == "s":
