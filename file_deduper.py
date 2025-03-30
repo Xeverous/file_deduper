@@ -342,6 +342,48 @@ class HashGrouping(Grouping):
         print(f"duplicate files: {duplicate_files}")
         print(f"space taken by duplicates: {pretty_byte_size(space_taken_by_duplicates)}")
 
+class LeftRightGrouping(Grouping):
+    def __init__(self, grouping: Dict[bytes, Tuple[List[Entry], List[Entry]]], order_by_date=False):
+        self._grouping = grouping
+
+        if order_by_date:
+            for entries in self._grouping.values():
+                sort_by_date(entries[0])
+                sort_by_date(entries[1])
+
+    def grouping(self) -> Tuple[List[Entry], List[Entry]]:
+        return self._grouping
+###
+    def compute_stats(self) -> Tuple[int, int, int]:
+        duplicate_sets = 0
+        duplicate_files = 0 # not duplicate_entries because hashes are computed only for files
+        space_taken_by_duplicates = 0
+
+        for _, entries in self._grouping.items():
+            if len(entries) > 1:
+                duplicates = len(entries) - 1 # -1 because one copy should remain.
+                duplicate_sets += 1
+                duplicate_files += duplicates
+                # It can be very safely assumed that the size of each file with same hash is identical.
+                # As of writing this, there is no known SHA-256 collision.
+                space_taken_by_duplicates += entries[0].size * duplicates
+        return duplicate_sets, duplicate_files, space_taken_by_duplicates
+
+    def print_set(self, key: bytes, pretty_size=False, numerate=False):
+        Grouping.print_set(to_hex(key), self._grouping[key], pretty_size, numerate)
+
+    def print_duplicates(self, pretty_size=False):
+        print("HASH DUPLICATES:")
+        for key in self.keys_to_duplicate_sets():
+            self.print_set(key, pretty_size=pretty_size)
+
+    def print_stats(self):
+        print("HASH DUPLICATE STATS:")
+        duplicate_sets, duplicate_files, space_taken_by_duplicates = self.compute_stats()
+        print(f"duplicate sets: {duplicate_sets}")
+        print(f"duplicate files: {duplicate_files}")
+        print(f"space taken by duplicates: {pretty_byte_size(space_taken_by_duplicates)}")
+
 
 def group_by_name(entries: Dict[str, Entry], order_by_date=False) -> NameGrouping:
     result = {}
@@ -366,6 +408,46 @@ def group_by_hash(entries: Dict[str, Entry], total_bytes: int, order_by_date=Fal
 
     bar.finish()
     return HashGrouping(result, order_by_date)
+
+def group_left_right(scan_left: ScanResult, scan_right: ScanResult, order_by_date=False) -> LeftRightGrouping:
+    total_bytes = scan_left.total_size + scan_right.total_size
+    result: Dict[bytes, Tuple[List[Entry], List[Entry]]] = {}
+    processed_bytes = 0
+    bar = progressbar.ProgressBar(
+        maxval=total_bytes,
+        widgets=[progressbar.Bar('#', '[', ']'), ' ', progressbar.Percentage()])
+    bar.start()
+
+    for entry in scan_left.all_objects.values():
+        if not entry.is_dir:
+            entry.checksum = sha256sum(entry.path)
+
+            t = result.get(entry.checksum)
+            if t:
+                t[0].append(entry)
+            else:
+                result.update([(entry.checksum, ([entry], []))])
+
+            processed_bytes += entry.size
+            bar.update(processed_bytes)
+
+    for entry in scan_right.all_objects.values():
+        if not entry.is_dir:
+            entry.checksum = sha256sum(entry.path)
+
+            t = result.get(entry.checksum)
+            if t:
+                t[1].append(entry)
+            else:
+                result.update([(entry.checksum, ([], [entry]))])
+
+            processed_bytes += entry.size
+            bar.update(processed_bytes)
+
+    bar.finish()
+    return LeftRightGrouping(result, order_by_date)
+
+
 
 class Deduper:
     def __init__(self, paths: List[str], exclude_regexes: List[re.Pattern] = [],
@@ -397,6 +479,22 @@ class Deduper:
             # future improvement: compute hashes concurrently
             print("computing hashes...")
             self.grouping = group_by_hash(self.scan_result.all_objects, self.scan_result.total_size, self.order_by_date)
+
+    def search_2_roots_duplicates(self):
+        if len(self.paths) != 2:
+            print("error: 2 root paths required")
+            return
+
+        paths = self.paths
+        self.paths = [paths[0]]
+        self.scan()
+        self.left_scan_result = self.scan_result
+        self.paths = [paths[1]]
+        self.scan()
+        self.right_scan_result = self.scan_result
+        del self.scan_result
+
+        self.grouping = group_left_right(self.left_scan_result, self.right_scan_result, self.order_by_date)
 
     def print_duplicates(self, pretty_size=False):
         if self.grouping:
@@ -440,6 +538,7 @@ class Deduper:
             print("s - print stats")
             print("n - interactively remove name duplicates")
             print("h - interactively remove hash duplicates")
+            print("2 - 2-root-paths left-right mode")
             print("r - reset (use when changes were made outside this program)")
             print("q - quit")
             answer = input()
@@ -455,6 +554,9 @@ class Deduper:
                 self.run_interactive_duplicates()
             elif answer == "h":
                 self.search_hash_duplicates()
+                self.run_interactive_duplicates()
+            elif answer == "2":
+                self.search_2_roots_duplicates()
                 self.run_interactive_duplicates()
             elif answer == "r":
                 self.scan()
