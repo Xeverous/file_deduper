@@ -475,7 +475,6 @@ class Deduper:
                 print("  s   - keep all of these files (skip this set)")
                 print("  b   - back to previous menu")
                 answer = input()
-                print_separator()
                 idx1 = str_to_int(answer)
                 if idx1 is not None:
                     if idx1 == 0:
@@ -491,7 +490,10 @@ class Deduper:
                 if answer == "s":
                     break
                 elif answer == "b":
+                    print_separator()
                     return
+                print_separator()
+            print_separator()
 
 
 if __name__ == "__main__":
